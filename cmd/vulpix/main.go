@@ -1,18 +1,15 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/vulpeslab/vulpix/internal/agent"
 	"github.com/vulpeslab/vulpix/internal/config"
 	"github.com/vulpeslab/vulpix/internal/logger"
-	"github.com/vulpeslab/vulpix/internal/mcp"
 	"github.com/vulpeslab/vulpix/internal/provider"
 	"github.com/vulpeslab/vulpix/internal/rag"
 	"github.com/vulpeslab/vulpix/internal/tools"
@@ -99,31 +96,6 @@ func main() {
 
 	if ragEngine != nil {
 		toolList = append(toolList, tools.NewSearchTool(ragEngine))
-	}
-
-	// 6. Initialize Exa MCP
-	log.Info("Connecting to Exa MCP...")
-	exaCtx := context.Background()
-	// Use npx mcp-remote to connect to the hosted Exa MCP server
-	// This avoids implementing the complex HTTP/SSE transport manually and leverages the official client.
-	// We enable specific tools as requested.
-	exaUrl := "https://mcp.exa.ai/mcp?tools=web_search_exa,get_code_context_exa"
-	exaClient, err := mcp.NewClient(exaCtx, "npx", []string{"-y", "mcp-remote", exaUrl})
-	if err != nil {
-		log.Warn("Failed to connect to Exa MCP", "error", err)
-	} else {
-		// List tools with a timeout
-		// npx might take a while to install/start, so give it more time
-		listCtx, listCancel := context.WithTimeout(exaCtx, 30*time.Second)
-		exaTools, err := exaClient.ListTools(listCtx)
-		listCancel()
-
-		if err != nil {
-			log.Warn("Failed to list Exa tools", "error", err)
-		} else {
-			toolList = append(toolList, exaTools...)
-			log.Info("Added Exa MCP tools", "count", len(exaTools))
-		}
 	}
 
 	// 7. Initialize Agent Engine

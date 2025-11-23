@@ -16,8 +16,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/vulpeslab/vulpix/internal/agent"
+	"github.com/vulpeslab/vulpix/internal/mcp"
 	"github.com/vulpeslab/vulpix/internal/rag"
 	"github.com/vulpeslab/vulpix/pkg/core"
+)
+
+type MCPStatus int
+
+const (
+	MCPStatusDisconnected MCPStatus = iota
+	MCPStatusConnecting
+	MCPStatusConnected
+	MCPStatusError
 )
 
 type Command struct {
@@ -73,6 +83,8 @@ type Model struct {
 	needsSummarize       bool
 	collapseReasoning    bool
 	truncateToolResponse bool
+	mcpStatus            MCPStatus
+	mcpCount             int
 
 	// Double-press protection
 	lastCancelTime time.Time
@@ -127,6 +139,7 @@ func NewModel(engine *agent.Engine, ragEngine *rag.Engine, modelName string, aut
 		yoloMode:             autoApprove,
 		collapseReasoning:    collapseReasoning,
 		truncateToolResponse: truncateToolResponse,
+		mcpStatus:            MCPStatusConnecting,
 	}
 }
 
@@ -134,7 +147,34 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		m.fetchContextWindow(),
+		connectMCP,
+		m.spinner.Tick,
 	)
+}
+
+type mcpConnectedMsg struct {
+	tools []core.Tool
+	err   error
+}
+
+func connectMCP() tea.Msg {
+	ctx := context.Background()
+	// Use npx mcp-remote to connect to the hosted Exa MCP server
+	exaUrl := "https://mcp.exa.ai/mcp?tools=web_search_exa,get_code_context_exa"
+	exaClient, err := mcp.NewClient(ctx, "npx", []string{"-y", "mcp-remote", exaUrl})
+	if err != nil {
+		return mcpConnectedMsg{err: err}
+	}
+
+	listCtx, listCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer listCancel()
+
+	exaTools, err := exaClient.ListTools(listCtx)
+	if err != nil {
+		return mcpConnectedMsg{err: err}
+	}
+
+	return mcpConnectedMsg{tools: exaTools}
 }
 
 func (m Model) fetchContextWindow() tea.Cmd {
@@ -348,6 +388,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case mcpConnectedMsg:
+		if msg.err != nil {
+			m.mcpStatus = MCPStatusError
+		} else {
+			m.mcpStatus = MCPStatusConnected
+			m.mcpCount = len(msg.tools)
+			m.engine.AddTools(msg.tools)
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyShiftTab:
@@ -499,7 +548,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case spinner.TickMsg:
-		if !m.processing {
+		if !m.processing && m.mcpStatus != MCPStatusConnecting {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -698,6 +747,19 @@ func (m Model) View() string {
 	}
 
 	statusContent := fmt.Sprintf("Mode: %s | Model: %s | Context Left: %s", m.mode, m.modelName, contextLeftStr)
+
+	// MCP Status
+	var mcpStatusStr string
+	switch m.mcpStatus {
+	case MCPStatusConnecting:
+		mcpStatusStr = fmt.Sprintf(" | MCP %s", m.spinner.View())
+	case MCPStatusConnected:
+		mcpStatusStr = fmt.Sprintf(" | %d MCP ✓", m.mcpCount)
+	case MCPStatusError:
+		mcpStatusStr = " | MCP ❌"
+	}
+	statusContent += mcpStatusStr
+
 	if m.processing {
 		statusContent += fmt.Sprintf(" | %s Processing...", m.spinner.View())
 	}
