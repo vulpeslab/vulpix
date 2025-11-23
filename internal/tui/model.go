@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -19,6 +20,27 @@ import (
 	"github.com/vulpeslab/vulpix/internal/mcp"
 	"github.com/vulpeslab/vulpix/internal/rag"
 	"github.com/vulpeslab/vulpix/pkg/core"
+)
+
+type MCPPopupState int
+
+const (
+	MCPPopupList MCPPopupState = iota
+	MCPPopupDetail
+	MCPPopupTools
+	MCPPopupToolDetail
+	MCPPopupAddManual
+)
+
+type MCPAddStep int
+
+const (
+	MCPAddStepName MCPAddStep = iota
+	MCPAddStepType
+	MCPAddStepUrl
+	MCPAddStepCommand
+	MCPAddStepArgs
+	MCPAddStepEnv
 )
 
 type MCPStatus int
@@ -44,6 +66,7 @@ var commands = []Command{
 	{"/auth", "Configure authentication"},
 	{"/index", "Index the current codebase"},
 	{"/summarize", "Summarize context and start fresh"},
+	{"/mcp", "Manage MCP servers"},
 }
 
 type HistoryItem struct {
@@ -85,6 +108,16 @@ type Model struct {
 	truncateToolResponse bool
 	mcpStatus            MCPStatus
 	mcpCount             int
+	mcpManager           *mcp.Manager
+	showMCPPopup         bool
+	mcpPopupState        MCPPopupState
+	selectedMCPIndex     int
+	selectedToolIndex    int
+
+	// MCP Add Wizard
+	mcpAddStep   MCPAddStep
+	mcpTextInput textinput.Model
+	newMCPConfig mcp.ServerConfig
 
 	// Double-press protection
 	lastCancelTime time.Time
@@ -94,7 +127,7 @@ type Model struct {
 const Version = "0.1.0"
 
 // NewModel creates a new TUI model
-func NewModel(engine *agent.Engine, ragEngine *rag.Engine, modelName string, autoApprove bool, collapseReasoning bool, truncateToolResponse bool) Model {
+func NewModel(engine *agent.Engine, ragEngine *rag.Engine, mcpManager *mcp.Manager, modelName string, autoApprove bool, collapseReasoning bool, truncateToolResponse bool) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Vulpix..."
 	ta.Focus()
@@ -140,6 +173,8 @@ func NewModel(engine *agent.Engine, ragEngine *rag.Engine, modelName string, aut
 		collapseReasoning:    collapseReasoning,
 		truncateToolResponse: truncateToolResponse,
 		mcpStatus:            MCPStatusConnecting,
+		mcpManager:           mcpManager,
+		mcpTextInput:         textinput.New(),
 	}
 }
 
@@ -147,7 +182,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		m.fetchContextWindow(),
-		connectMCP,
+		m.connectAllMCP(),
 		m.spinner.Tick,
 	)
 }
@@ -157,24 +192,13 @@ type mcpConnectedMsg struct {
 	err   error
 }
 
-func connectMCP() tea.Msg {
-	ctx := context.Background()
-	// Use npx mcp-remote to connect to the hosted Exa MCP server
-	exaUrl := "https://mcp.exa.ai/mcp?tools=web_search_exa,get_code_context_exa"
-	exaClient, err := mcp.NewClient(ctx, "npx", []string{"-y", "mcp-remote", exaUrl})
-	if err != nil {
-		return mcpConnectedMsg{err: err}
+func (m Model) connectAllMCP() tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		m.mcpManager.ConnectAll(ctx)
+		tools := m.mcpManager.GetAllTools()
+		return mcpConnectedMsg{tools: tools}
 	}
-
-	listCtx, listCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer listCancel()
-
-	exaTools, err := exaClient.ListTools(listCtx)
-	if err != nil {
-		return mcpConnectedMsg{err: err}
-	}
-
-	return mcpConnectedMsg{tools: exaTools}
 }
 
 func (m Model) fetchContextWindow() tea.Cmd {
@@ -332,6 +356,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vpCmd tea.Cmd
 	)
 
+	// Handle MCP connection updates globally
+	if msg, ok := msg.(mcpConnectedMsg); ok {
+		if msg.err != nil {
+			m.mcpStatus = MCPStatusError
+		} else {
+			m.mcpStatus = MCPStatusConnected
+
+			m.mcpManager.Mu().RLock()
+			count := 0
+			for _, s := range m.mcpManager.Servers {
+				if s.Status == mcp.StatusConnected {
+					count++
+				}
+			}
+			m.mcpManager.Mu().RUnlock()
+			m.mcpCount = count
+
+			m.engine.SetTools(msg.tools)
+		}
+		return m, nil
+	}
+
+	if m.showMCPPopup {
+		return m.updateMCPPopup(msg)
+	}
+
 	// Handle auto-complete navigation before textarea update
 	if m.showSuggestions {
 		switch msg := msg.(type) {
@@ -388,15 +438,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case mcpConnectedMsg:
-		if msg.err != nil {
-			m.mcpStatus = MCPStatusError
-		} else {
-			m.mcpStatus = MCPStatusConnected
-			m.mcpCount = len(msg.tools)
-			m.engine.AddTools(msg.tools)
-		}
-		return m, nil
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyShiftTab:
@@ -511,6 +552,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							},
 							m.spinner.Tick,
 						)
+					case "/mcp":
+						m.showMCPPopup = true
+						m.mcpPopupState = MCPPopupList
+						return m, nil
 					}
 				}
 
@@ -821,6 +866,16 @@ func (m Model) View() string {
 			views = append(views, errorView)
 		}
 		return lipgloss.JoinVertical(lipgloss.Left, views...)
+	}
+
+	if m.showMCPPopup {
+		return lipgloss.Place(
+			m.viewport.Width,
+			m.viewport.Height+5,
+			lipgloss.Center,
+			lipgloss.Center,
+			m.viewMCPPopup(),
+		)
 	}
 
 	views := []string{m.viewport.View()}

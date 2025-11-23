@@ -47,6 +47,10 @@ func (e *Engine) AddTools(newTools []core.Tool) {
 	e.tools = append(e.tools, newTools...)
 }
 
+func (e *Engine) SetTools(tools []core.Tool) {
+	e.tools = tools
+}
+
 func (e *Engine) GetContextWindow(ctx context.Context, model string) (int, error) {
 	return e.provider.GetContextWindow(ctx, model)
 }

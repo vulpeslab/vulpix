@@ -10,6 +10,7 @@ import (
 	"github.com/vulpeslab/vulpix/internal/agent"
 	"github.com/vulpeslab/vulpix/internal/config"
 	"github.com/vulpeslab/vulpix/internal/logger"
+	"github.com/vulpeslab/vulpix/internal/mcp"
 	"github.com/vulpeslab/vulpix/internal/provider"
 	"github.com/vulpeslab/vulpix/internal/rag"
 	"github.com/vulpeslab/vulpix/internal/tools"
@@ -98,11 +99,17 @@ func main() {
 		toolList = append(toolList, tools.NewSearchTool(ragEngine))
 	}
 
+	// 6. Initialize MCP Manager
+	mcpManager := mcp.NewManager()
+	if err := mcpManager.LoadServers(); err != nil {
+		log.Warn("Failed to load MCP servers", "error", err)
+	}
+
 	// 7. Initialize Agent Engine
 	engine := agent.NewEngine(prov, toolList, log)
 
 	// 8. Initialize TUI
-	model := tui.NewModel(engine, ragEngine, cfg.Model, cfg.AutoApprove, cfg.CollapseReasoning, cfg.TruncateToolResponse)
+	model := tui.NewModel(engine, ragEngine, mcpManager, cfg.Model, cfg.AutoApprove, cfg.CollapseReasoning, cfg.TruncateToolResponse)
 
 	// 9. Run
 	p := tea.NewProgram(model, tea.WithAltScreen())

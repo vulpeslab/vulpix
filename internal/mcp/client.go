@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -32,8 +33,14 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) (string, err
 	return t.client.CallTool(ctx, t.name, args)
 }
 
-func NewClient(ctx context.Context, command string, args []string) (*Client, error) {
+func NewClient(ctx context.Context, command string, args []string, env map[string]string) (*Client, error) {
 	cmd := exec.Command(command, args...)
+	if len(env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 	transport := &mcp.CommandTransport{
 		Command: cmd,
 	}
